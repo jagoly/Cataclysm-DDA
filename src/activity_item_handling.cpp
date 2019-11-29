@@ -259,13 +259,13 @@ void drop_on_map( Character &c, item_drop_reason reason, const std::list<item> &
         switch( reason ) {
             case item_drop_reason::deliberate:
                 if( can_move_there ) {
-                    c.add_msg_player_or_npc(
-                        ngettext( "You drop your %1$s on the %2$s.",
-                                  "You drop your %1$s on the %2$s.", dropcount ),
-                        ngettext( "<npcname> drops their %1$s on the %2$s.",
-                                  "<npcname> drops their %1$s on the %2$s.", dropcount ),
-                        it_name, ter_name
-                    );
+//                    c.add_msg_player_or_npc(
+//                        ngettext( "You drop your %1$s on the %2$s.",
+//                                  "You drop your %1$s on the %2$s.", dropcount ),
+//                        ngettext( "<npcname> drops their %1$s on the %2$s.",
+//                                  "<npcname> drops their %1$s on the %2$s.", dropcount ),
+//                        it_name, ter_name
+//                    );
                 } else {
                     c.add_msg_player_or_npc(
                         ngettext( "You put your %1$s in the %2$s.",
@@ -2199,51 +2199,60 @@ void activity_on_turn_move_loot( player_activity &act, player &p )
             vehicle *this_veh = it->second ? src_veh : nullptr;
             const int this_part = it->second ? src_part : -1;
 
-            const zone_type_id id = mgr.get_near_zone_type_for_item( thisitem, abspos,
-                                    ACTIVITY_SEARCH_DISTANCE );
+            const std::map<int, std::set<tripoint>> dest_point_sets = mgr.get_item_destinations( thisitem,
+                                                 abspos, ACTIVITY_SEARCH_DISTANCE );
 
-            // checks whether the item is already on correct loot zone or not
-            // if it is, we can skip such item, if not we move the item to correct pile
-            // think empty bag on food pile, after you ate the content
-            if( mgr.has( id, src ) ) {
-                continue;
-            }
-
-            const std::unordered_set<tripoint> &dest_set = mgr.get_near( id, abspos, ACTIVITY_SEARCH_DISTANCE,
-                    &thisitem );
-            for( const tripoint &dest : dest_set ) {
-                const tripoint &dest_loc = g->m.getlocal( dest );
-
-                //Check destination for cargo part
-                if( const cata::optional<vpart_reference> vp = g->m.veh_at( dest_loc ).part_with_feature( "CARGO",
-                        false ) ) {
-                    dest_veh = &vp->vehicle();
-                    dest_part = vp->part_index();
-                } else {
-                    dest_veh = nullptr;
-                    dest_part = -1;
+            for( const auto &elem : dest_point_sets ) {
+                // maybe get_item_destinations should just return values in local space?
+                std::set<tripoint> local_dest_set;
+                for( const tripoint &dest : elem.second ) {
+                    local_dest_set.insert( g->m.getlocal( dest ) );
                 }
 
-                // skip tiles with inaccessible furniture, like filled charcoal kiln
-                if( !g->m.can_put_items_ter_furn( dest_loc ) ) {
-                    continue;
+                // checks whether the item is already on correct loot zone or not
+                // not that the item will still be moved to zone with a higher priority
+                if( local_dest_set.count( src_loc ) ) {
+                    break;
                 }
 
-                units::volume free_space;
-                // if there's a vehicle with space do not check the tile beneath
-                if( dest_veh ) {
-                    free_space = dest_veh->free_volume( dest_part );
-                } else {
-                    free_space = g->m.free_volume( dest_loc );
-                }
-                // check free space at destination
-                if( free_space >= thisitem.volume() ) {
-                    move_item( p, thisitem, thisitem.count(), src_loc, dest_loc, this_veh, this_part );
+                bool item_moved = false;
 
-                    // moved item away from source so decrement
-                    if( num_processed > 0 ) {
-                        --num_processed;
+                for( const tripoint &dest_loc : local_dest_set ) {
+                    //Check destination for cargo part
+                    if( const cata::optional<vpart_reference> vp = g->m.veh_at( dest_loc ).part_with_feature( "CARGO",
+                            false ) ) {
+                        dest_veh = &vp->vehicle();
+                        dest_part = vp->part_index();
+                    } else {
+                        dest_veh = nullptr;
+                        dest_part = -1;
                     }
+
+                    // skip tiles with inaccessible furniture, like filled charcoal kiln
+                    if( !g->m.can_put_items_ter_furn( dest_loc ) ) {
+                        continue;
+                    }
+
+                    units::volume free_space;
+                    // if there's a vehicle with space do not check the tile beneath
+                    if( dest_veh ) {
+                        free_space = dest_veh->free_volume( dest_part );
+                    } else {
+                        free_space = g->m.free_volume( dest_loc );
+                    }
+                    // check free space at destination
+                    if( free_space >= thisitem.volume() ) {
+                        move_item( p, thisitem, thisitem.count(), src_loc, dest_loc, this_veh, this_part );
+
+                        // moved item away from source so decrement
+                        if( num_processed > 0 ) {
+                            --num_processed;
+                        }
+                        item_moved = true;
+                        break;
+                    }
+                }
+                if( item_moved ) {
                     break;
                 }
             }

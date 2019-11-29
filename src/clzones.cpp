@@ -503,6 +503,11 @@ void zone_data::set_is_vehicle( const bool is_vehicle_arg )
     is_vehicle = is_vehicle_arg;
 }
 
+void zone_data::set_priority( int priority_arg )
+{
+    priority = priority_arg;
+}
+
 tripoint zone_data::get_center_point() const
 {
     return tripoint( ( start.x + end.x ) / 2, ( start.y + end.y ) / 2, ( start.z + end.z ) / 2 );
@@ -533,6 +538,8 @@ void zone_manager::cache_data()
 {
     area_cache.clear();
 
+    loot_area_cache.clear();
+
     for( auto &elem : zones ) {
         if( !elem.get_enabled() ) {
             continue;
@@ -545,6 +552,17 @@ void zone_manager::cache_data()
         for( const tripoint &p : tripoint_range( elem.get_start_point(), elem.get_end_point() ) ) {
             cache.insert( p );
         }
+
+        // todo: there is no reason to cache unsorted/ignore zones here
+        //       will fix if performance tests say that keeping hardcoded zones is worthwile
+        //       otherwise we would just check if the zone is LOOT_CUSTOM
+        // also, this would should get merged with the above loop
+//        if( string_starts_with( elem.get_type().str(), "LOOT" ) ) {
+//            auto &loot_cache = loot_area_cache[type_hash];
+//            for( const tripoint &p : tripoint_range( elem.get_start_point(), elem.get_end_point() ) ) {
+//                loot_cache[p].push_back( &elem );
+//            }
+//        }
     }
 }
 
@@ -566,6 +584,13 @@ void zone_manager::cache_vzones()
         for( const tripoint &p : tripoint_range( elem->get_start_point(), elem->get_end_point() ) ) {
             cache.insert( p );
         }
+
+//        if( string_starts_with( elem->get_type().str(), "LOOT" ) ) {
+//            auto &loot_cache = loot_vzone_cache[type_hash];
+//            for( const tripoint &p : tripoint_range( elem->get_start_point(), elem->get_end_point() ) ) {
+//                loot_cache[p].push_back( elem );
+//            }
+//        }
     }
 }
 
@@ -649,23 +674,6 @@ bool zone_manager::has_near( const zone_type_id &type, const tripoint &where, in
     return false;
 }
 
-bool zone_manager::has_loot_dest_near( const tripoint &where ) const
-{
-    for( const auto &ztype : get_manager().get_types() ) {
-        const zone_type_id &type = ztype.first;
-        if( type == zone_type_id( "CAMP_FOOD" ) || type == zone_type_id( "FARM_PLOT" ) ||
-            type == zone_type_id( "LOOT_UNSORTED" ) || type == zone_type_id( "LOOT_IGNORE" ) ||
-            type == zone_type_id( "CONSTRUCTION_BLUEPRINT" ) ||
-            type == zone_type_id( "NO_AUTO_PICKUP" ) || type == zone_type_id( "NO_NPC_PICKUP" ) ) {
-            continue;
-        }
-        if( has_near( type, where ) ) {
-            return true;
-        }
-    }
-    return false;
-}
-
 const zone_data *zone_manager::get_zone_at( const tripoint &where, const zone_type_id &type ) const
 {
     for( const zone_data &zone : zones ) {
@@ -682,21 +690,8 @@ const zone_data *zone_manager::get_zone_at( const tripoint &where, const zone_ty
     return nullptr;
 }
 
-bool zone_manager::custom_loot_has( const tripoint &where, const item *it ) const
-{
-    auto zone = get_zone_at( where, zone_type_id( "LOOT_CUSTOM" ) );
-    if( !zone || !it ) {
-        return false;
-    }
-    const loot_options options = dynamic_cast<const loot_options &>( zone->get_options() );
-    std::string filter_string = options.get_mark();
-    auto z = item_filter_from_string( filter_string );
-
-    return z( *it );
-}
-
 std::unordered_set<tripoint> zone_manager::get_near( const zone_type_id &type,
-        const tripoint &where, int range, const item *it, const faction_id &fac ) const
+        const tripoint &where, int range, const faction_id &fac ) const
 {
     const auto &point_set = get_point_set( type, fac );
     auto near_point_set = std::unordered_set<tripoint>();
@@ -704,13 +699,7 @@ std::unordered_set<tripoint> zone_manager::get_near( const zone_type_id &type,
     for( auto &point : point_set ) {
         if( point.z == where.z ) {
             if( square_dist( point, where ) <= range ) {
-                if( it && has( zone_type_id( "LOOT_CUSTOM" ), point ) ) {
-                    if( custom_loot_has( point, it ) ) {
-                        near_point_set.insert( point );
-                    }
-                } else {
-                    near_point_set.insert( point );
-                }
+                near_point_set.insert( point );
             }
         }
     }
@@ -719,13 +708,7 @@ std::unordered_set<tripoint> zone_manager::get_near( const zone_type_id &type,
     for( auto &point : vzone_set ) {
         if( point.z == where.z ) {
             if( square_dist( point, where ) <= range ) {
-                if( it && has( zone_type_id( "LOOT_CUSTOM" ), point ) ) {
-                    if( custom_loot_has( point, it ) ) {
-                        near_point_set.insert( point );
-                    }
-                } else {
-                    near_point_set.insert( point );
-                }
+                near_point_set.insert( point );
             }
         }
     }
@@ -771,66 +754,104 @@ cata::optional<tripoint> zone_manager::get_nearest( const zone_type_id &type, co
     return nearest_pos;
 }
 
-zone_type_id zone_manager::get_near_zone_type_for_item( const item &it,
-        const tripoint &where, int range ) const
+//std::map<int, std::set<tripoint>> zone_manager::get_item_destinations( const item &it,
+//                                                                      const tripoint &where,
+//                                                                      int range, const faction_id &fac ) const
+//{
+//    // version with a cache. note that if you have multi-tile custom loot zones, you actually have to
+//    // test the filter once per tile per item, rather than just once per item. this was also the case
+//    // with the old code. overall I expect my code to be faster when you have a lot of custom loot
+//    // zones, and equivilant for just builtin loot zones. of course I intend to test this. my hunch is
+//    // that this cache doesn't actually speed things up at all
+
+//    std::map<int, std::set<tripoint>> result;
+
+//    const cata::optional<zone_type_id> cat_zone = it.get_category().zone();
+//    if (cat_zone) {
+//        const auto add_points_for_cache = [&](const std::unordered_map<std::string, loot_dest_cache_map> &cache) {
+//            const auto iter = cache.find( zone_data::make_type_hash( cat_zone.value(), fac ) );
+//            if( iter != cache.end() ) {
+//                for ( const auto &elem : iter->second ) {
+//                    if (square_dist(where, elem.first) <= range) {
+//                        for( const zone_data *zone : elem.second ) {
+//                            result[zone->get_priority()].emplace(elem.first);
+//                        }
+//                    }
+//                }
+//            }
+//        };
+//        add_points_for_cache(loot_area_cache);
+//        add_points_for_cache(loot_vzone_cache);
+//    }
+
+//    const auto add_points_for_cache = [&](const std::unordered_map<std::string, loot_dest_cache_map> &cache) {
+//        const auto iter = cache.find( zone_data::make_type_hash( zone_type_id("LOOT_CUSTOM"), fac ) );
+//        if( iter != cache.end() ) {
+//            for ( const auto &elem : iter->second ) {
+//                if (square_dist(where, elem.first) <= range) {
+//                    for( const zone_data *zone : elem.second ) {
+//                        const loot_options &options = dynamic_cast<const loot_options &>( zone->get_options() );
+//                        if( item_filter_from_string( options.get_mark() )( it ) ) {
+//                            result[zone->get_priority()].insert(elem.first);
+//                        }
+//                    }
+//                }
+//            }
+//        }
+//    };
+//    add_points_for_cache(loot_area_cache);
+//    add_points_for_cache(loot_vzone_cache);
+
+//    return result;
+//}
+
+std::map<int, std::set<tripoint>> zone_manager::get_item_destinations( const item &it,
+                               const tripoint &where,
+                               int range, const faction_id &fac ) const
 {
-    const item_category &cat = it.get_category();
+    // version without a cache
 
-    if( has_near( zone_type_id( "LOOT_CUSTOM" ), where, range ) ) {
-        for( const auto elem : get_near( zone_type_id( "LOOT_CUSTOM" ), where, range, &it ) ) {
-            ( void )elem;
-            return zone_type_id( "LOOT_CUSTOM" );
+    std::map<int, std::set<tripoint>> result;
+
+    //const auto cat_zone = it.get_category().zone();
+
+    const auto add_points_for_zone = [&]( const zone_data & zone ) {
+        if( !zone.get_enabled() || zone.get_faction() != fac || zone.get_start_point().z != where.z ) {
+            return;
         }
-    }
-    if( it.has_flag( "FIREWOOD" ) ) {
-        if( has_near( zone_type_id( "LOOT_WOOD" ), where, range ) ) {
-            return zone_type_id( "LOOT_WOOD" );
-        }
-    }
-    if( it.is_corpse() ) {
-        if( has_near( zone_type_id( "LOOT_CORPSE" ), where, range ) ) {
-            return zone_type_id( "LOOT_CORPSE" );
-        }
-    }
-
-    if( cat.zone() ) {
-        return *cat.zone();
-    }
-
-    if( cat.get_id() == "food" ) {
-        const bool preserves = it.is_food_container() && it.type->container->preserves;
-        const auto &it_food = it.is_food_container() ? it.contents.front() : it;
-
-        if( it_food.is_food() ) { // skip food without comestible, like MREs
-            if( it_food.get_comestible()->comesttype == "DRINK" ) {
-                if( !preserves && it_food.goes_bad() && has_near( zone_type_id( "LOOT_PDRINK" ), where, range ) ) {
-                    return zone_type_id( "LOOT_PDRINK" );
-                } else if( has_near( zone_type_id( "LOOT_DRINK" ), where, range ) ) {
-                    return zone_type_id( "LOOT_DRINK" );
+        /*if( cat_zone && zone.get_type() == cat_zone.value() ) {
+            for( tripoint point : tripoint_range( zone.get_start_point(), zone.get_end_point() ) ) {
+                if( square_dist( where, point ) <= range ) {
+                    result[zone.get_priority()].insert( point );
                 }
             }
-
-            if( !preserves && it_food.goes_bad() && has_near( zone_type_id( "LOOT_PFOOD" ), where, range ) ) {
-                return zone_type_id( "LOOT_PFOOD" );
+        } else */if( zone.get_type() == zone_type_id( "LOOT_CUSTOM" ) ) {
+            const loot_options &options = dynamic_cast<const loot_options &>( zone.get_options() );
+            if( item_filter_from_string( options.get_mark() )( it ) ) {
+                for( tripoint point : tripoint_range( zone.get_start_point(), zone.get_end_point() ) ) {
+                    if( square_dist( where, point ) <= range ) {
+                        result[zone.get_priority()].insert( point );
+                    }
+                }
             }
         }
+    };
 
-        return zone_type_id( "LOOT_FOOD" );
-    }
-    if( cat.get_id() == "clothing" ) {
-        if( it.is_filthy() && has_near( zone_type_id( "LOOT_FCLOTHING" ), where, range ) ) {
-            return zone_type_id( "LOOT_FCLOTHING" );
-        }
-        return zone_type_id( "LOOT_CLOTHING" );
-    }
-    if( cat.get_id() == "armor" ) {
-        if( it.is_filthy() && has_near( zone_type_id( "LOOT_FARMOR" ), where, range ) ) {
-            return zone_type_id( "LOOT_FARMOR" );
-        }
-        return zone_type_id( "LOOT_ARMOR" );
+    // my intuition tells me that checking an item against a string filter takes practically no time
+    // I do intend to profile this of course, as kevin and others believe it will be slow
+
+    // for priority to work like this, the existing zone cache maps are inadequite, since we need not only a point,
+    // but a priority. for this reason I've made a special second set of maps just for loot dest zones
+
+    for( const zone_data &zone : zones ) {
+        add_points_for_zone( zone );
     }
 
-    return zone_type_id();
+    for( const zone_data *zone : g->m.get_vehicle_zones( g->get_levz() ) ) {
+        add_points_for_zone( *zone );
+    }
+
+    return result;
 }
 
 std::vector<zone_data> zone_manager::get_zones( const zone_type_id &type,
@@ -971,17 +992,6 @@ bool zone_manager::remove( zone_data &zone )
     return true;
 }
 
-void zone_manager::swap( zone_data &a, zone_data &b )
-{
-    if( a.get_is_vehicle() || b.get_is_vehicle() ) {
-        //Current swap mechanic will change which vehicle the zone is on
-        // TODO: track and update vehicle zone priorities?
-        popup( _( "You cannot change the order of vehicle loot zones." ), PF_NONE );
-        return;
-    }
-    std::swap( a, b );
-}
-
 void zone_manager::rotate_zones( map &target_map, const int turns )
 {
     if( turns == 0 ) {
@@ -1016,7 +1026,7 @@ void zone_manager::rotate_zones( map &target_map, const int turns )
     }
 }
 
-std::vector<zone_manager::ref_zone_data> zone_manager::get_zones( const faction_id &fac )
+std::vector<zone_manager::ref_zone_data> zone_manager::get_all_zones( const faction_id &fac )
 {
     auto zones = std::vector<ref_zone_data>();
 
@@ -1034,10 +1044,17 @@ std::vector<zone_manager::ref_zone_data> zone_manager::get_zones( const faction_
         }
     }
 
+    const auto zone_compare = []( zone_manager::ref_zone_data & a, zone_manager::ref_zone_data & b ) {
+        const auto lhs = std::make_tuple( a.get().get_priority(), a.get().get_name() );
+        const auto rhs = std::make_tuple( b.get().get_priority(), b.get().get_name() );
+        return lhs < rhs;
+    };
+    std::sort( zones.begin(), zones.end(), zone_compare );
+
     return zones;
 }
 
-std::vector<zone_manager::ref_const_zone_data> zone_manager::get_zones(
+std::vector<zone_manager::ref_const_zone_data> zone_manager::get_all_zones(
     const faction_id &fac ) const
 {
     auto zones = std::vector<ref_const_zone_data>();
@@ -1055,6 +1072,14 @@ std::vector<zone_manager::ref_const_zone_data> zone_manager::get_zones(
             zones.emplace_back( *zone );
         }
     }
+
+    const auto zone_compare = []( zone_manager::ref_const_zone_data & a,
+    zone_manager::ref_const_zone_data & b ) {
+        const auto lhs = std::make_tuple( a.get().get_priority(), a.get().get_name() );
+        const auto rhs = std::make_tuple( b.get().get_priority(), b.get().get_name() );
+        return lhs < rhs;
+    };
+    std::sort( zones.begin(), zones.end(), zone_compare );
 
     return zones;
 }
@@ -1085,6 +1110,7 @@ void zone_data::serialize( JsonOut &json ) const
     json.member( "invert", invert );
     json.member( "enabled", enabled );
     json.member( "is_vehicle", is_vehicle );
+    json.member( "priority", priority );
     json.member( "start", start );
     json.member( "end", end );
     get_options().serialize( json );
@@ -1108,6 +1134,12 @@ void zone_data::deserialize( JsonIn &jsin )
         data.read( "is_vehicle", is_vehicle );
     } else {
         is_vehicle = false;
+    }
+    //Legacy support
+    if( data.has_member( "priority" ) ) {
+        data.read( "priority", priority );
+    } else {
+        priority = 0;
     }
     //Legacy support
     if( data.has_member( "start_x" ) ) {

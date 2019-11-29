@@ -6091,7 +6091,7 @@ void game::zones_manager()
     int zone_ui_height = 12;
     int zone_options_height = 7;
 
-    const int width = 45;
+    const int width = 48;
     const int offsetX = get_option<std::string>( "SIDEBAR_POSITION" ) == "left" ?
                         TERMX + VIEW_OFFSET_X - width : VIEW_OFFSET_X;
     int w_zone_height = TERMY - zone_ui_height - VIEW_OFFSET_Y * 2;
@@ -6133,15 +6133,17 @@ void game::zones_manager()
     bool show_all_zones = false;
     int zone_cnt = 0;
 
+
+
     // get zones on the same z-level, with distance between player and
     // zone center point <= 50 or all zones, if show_all_zones is true
     auto get_zones = [&]() {
         std::vector<zone_manager::ref_zone_data> zones;
         if( show_all_zones ) {
-            zones = mgr.get_zones();
+            zones = mgr.get_all_zones();
         } else {
             const tripoint &u_abs_pos = m.getabs( u.pos() );
-            for( zone_manager::ref_zone_data &ref : mgr.get_zones() ) {
+            for( zone_manager::ref_zone_data &ref : mgr.get_all_zones() ) {
                 const tripoint &zone_abs_pos = ref.get().get_center_point();
                 if( u_abs_pos.z == zone_abs_pos.z && rl_dist( u_abs_pos, zone_abs_pos ) <= 50 ) {
                     zones.emplace_back( ref );
@@ -6354,21 +6356,21 @@ void game::zones_manager()
                                             zone_ui_height, width );
                 zones_manager_shortcuts( w_zones_info );
 
-            } else if( action == "MOVE_ZONE_UP" && zone_cnt > 1 ) {
-                if( active_index < zone_cnt - 1 ) {
-                    mgr.swap( zones[active_index], zones[active_index + 1] );
-                    zones = get_zones();
-                    active_index++;
-                }
+            } else if( action == "MOVE_ZONE_UP" ) {
+                auto &zone = zones[active_index].get();
+                zone.set_priority( zone.get_priority() + 1 );
+                zones = get_zones();
+                auto iter = std::find_if(zones.begin(), zones.end(), [&](auto& ref) { return &ref.get() == &zone; });
+                active_index = static_cast<int>( std::distance( zones.begin(), iter ) );
                 blink = false;
                 stuff_changed = true;
 
-            } else if( action == "MOVE_ZONE_DOWN" && zone_cnt > 1 ) {
-                if( active_index > 0 ) {
-                    mgr.swap( zones[active_index], zones[active_index - 1] );
-                    zones = get_zones();
-                    active_index--;
-                }
+            } else if( action == "MOVE_ZONE_DOWN" ) {
+                auto &zone = zones[active_index].get();
+                zone.set_priority( zone.get_priority() - 1 );
+                zones = get_zones();
+                auto iter = std::find_if(zones.begin(), zones.end(), [&](auto& ref) { return &ref.get() == &zone; });
+                active_index = static_cast<int>( std::distance( zones.begin(), iter ) );
                 blink = false;
                 stuff_changed = true;
 
@@ -6429,7 +6431,7 @@ void game::zones_manager()
 
                     //Draw Zone name
                     mvwprintz( w_zones, point( 3, iNum - start_index ), colorLine,
-                               zone.get_name() );
+                               "%2d) %s", zone.get_priority(), zone.get_name() );
 
                     //Draw Type name
                     mvwprintz( w_zones, point( 20, iNum - start_index ), colorLine,
